@@ -1,0 +1,81 @@
+#!/usr/bin/env python
+import pandas as pd
+from requests import post,get
+import io
+import os
+
+def LAST_COMPLETED_FILENAME():
+    return 'noaa-planetary-k-index-forecast_completed.csv'
+
+def DELTA_FILENAME():
+    return '../noaa-planetary-k-index-forecast_delta.csv'
+
+def HA_TOKEN():
+    return ""
+
+def download_data():
+    url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json"
+    headers = {"content-type": "application/json"}
+    response = get(url)
+    if (response.status_code != 200):
+        raise Exception("Failed to Download Data. Status Code:" + str(response.status_code) + " Response Body:" + response.text)
+    forecast = pd.read_json(io.StringIO( response.text))
+    # set first row as column names and drop first row
+    forecast.rename(columns=forecast.iloc[0], inplace = True)
+    forecast.drop(forecast.index[0], inplace = True)
+
+    # structure data to meet expected format (statistic_id,unit,start,min,max,mean) mapped from (static,static,time_tag,kp,kp,kp)
+    forecast["statistic_id"] = "sensor:planetary_kp_index"
+    forecast["unit"] = "kp"
+    forecast['start'] = pd.to_datetime(forecast['time_tag']) # convert column to date format
+    forecast["min"] = forecast["kp"]
+    forecast["max"] = forecast["kp"]
+    forecast["mean"] = forecast["kp"]
+    csv_stream = io.StringIO()
+    forecast.to_csv(csv_stream,columns=['statistic_id', 'unit', 'start', 'min', 'max', 'mean'], date_format='%d.%m.%Y %H:%M', index=False, sep='\t')
+    csv_stream.seek(0)
+    forecast = pd.read_csv(csv_stream, sep='\t')
+    return forecast
+
+def run_import():
+    url = "http://localhost:8123/api/services/import_statistics/import_from_file"
+    #url = "http://localhost:8123/api/services"
+    headers = {"Authorization": "Bearer "+ HA_TOKEN()}
+    data = {"timezone_identifier": "GMT","delimiter": "\t", "decimal":False, "filename":os.path.basename(DELTA_FILENAME())}
+    #: Europe / Vienna
+    #delimiter: \t
+    #decimal: false
+    #filename: counterdata.tsv
+    response = post(url, headers=headers, json=data)
+    #response = get(url, headers=headers)
+    if(response.status_code != 200):
+        raise Exception("Failed to Import Data. Status Code:"+str(response.status_code)+ " Response Body:"+response.text)
+
+def get_existing():
+    if(os.path.isfile(LAST_COMPLETED_FILENAME())):
+       return pd.read_csv(LAST_COMPLETED_FILENAME(), sep='\t')
+    else:
+       return pd.DataFrame({'statistic_id': pd.Series(dtype='str'),'unit': pd.Series(dtype='str'),'min': pd.Series(dtype='float'),'max': pd.Series(dtype='float'),'mean': pd.Series(dtype='float')})
+
+def get_delta_data(forecast, existing):
+    delta = forecast.merge(existing, indicator=True, how='left').loc[lambda x: x['_merge'] != 'both']
+    delta.drop(['_merge'], inplace=True,axis=1)
+    print('DELTA:')
+    print(delta)
+    return delta
+
+def save_delta(delta_data):
+    delta_data.to_csv(DELTA_FILENAME(), index=False, sep='\t')
+
+def update_existing(forecast):
+    forecast.to_csv(LAST_COMPLETED_FILENAME(), index=False, sep='\t')
+
+# Press the green button in the gutter to run the script.
+if __name__ == '__main__':
+    forecast_data = download_data() #TODO: ERROR HANDLING
+    existing_data = get_existing()
+    delta_data = get_delta_data(forecast_data,existing_data) #TODO: ERROR HANDLING
+    save_delta(delta_data) #TODO: ERROR HANDLING
+    run_import()
+    update_existing(forecast_data)
+
