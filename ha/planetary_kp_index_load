@@ -1,11 +1,10 @@
 #!/usr/bin/env python
-
-from local_token import HA_TOKEN
-import requests
 import json
-import csv
 import os
+import csv
 from datetime import datetime
+from requests import post, get
+from local_token import HA_TOKEN
 
 def LAST_COMPLETED_FILENAME():
     return 'noaa-planetary-k-index-forecast_completed.csv'
@@ -15,64 +14,90 @@ def DELTA_FILENAME():
 
 def download_data():
     url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json"
-    headers = {"content-type": "application/json"}
-    response = requests.get(url)
+    response = get(url)
     if response.status_code != 200:
-        raise Exception(f"Failed to Download Data. Status Code: {response.status_code} Response Body: {response.text}")
-    
-    forecast = json.loads(response.text)
-    header = forecast[0]
-    data = forecast[1:]
-    
-    processed_data = []
-    for row in data:
-        time_tag = datetime.strptime(row[0], "%Y-%m-%dT%H:%M:%SZ")
-        kp_value = row[1]
-        processed_data.append({
-            "statistic_id": "sensor:planetary_kp_index",
-            "unit": "kp",
-            "start": time_tag.strftime('%d.%m.%Y %H:%M'),
-            "min": kp_value,
-            "max": kp_value,
-            "mean": kp_value
-        })
-    
-    return processed_data
+        raise Exception("Failed to Download Data. Status Code: " + str(response.status_code) + " Response Body: " + response.text)
+
+    # Parse the JSON data
+    data = json.loads(response.text)
+    columns = data[0]  # Extract column names from the first row
+    rows = data[1:]    # The rest are data rows
+
+    # Convert rows to a list of dictionaries
+    data_dicts = [dict(zip(columns, row)) for row in rows]
+
+    # Process and structure the data
+    for row in data_dicts:
+        row["statistic_id"] = "sensor:planetary_kp_index"
+        row["unit"] = "kp"
+        row["start"] = datetime.strptime(row["time_tag"], "%Y-%m-%d %H:%M:%S")
+        kp_value = float(row["kp"])
+        row["min"] = kp_value
+        row["max"] = kp_value
+        row["mean"] = kp_value
+
+    return data_dicts
+
+def run_import():
+    url = "http://localhost:8123/api/services/import_statistics/import_from_file"
+    headers = {"Authorization": "Bearer " + HA_TOKEN()}
+    data = {
+        "timezone_identifier": "GMT",
+        "delimiter": "\t",
+        "decimal": False,
+        "filename": os.path.basename(DELTA_FILENAME())
+    }
+    response = post(url, headers=headers, json=data)
+    if response.status_code != 200:
+        raise Exception("Failed to Import Data. Status Code: " + str(response.status_code) + " Response Body: " + response.text)
 
 def get_existing():
     if os.path.isfile(LAST_COMPLETED_FILENAME()):
-        with open(LAST_COMPLETED_FILENAME(), mode='r') as file:
-            reader = csv.DictReader(file, delimiter='\t')
-            existing_data = [row for row in reader]
+        existing_data = []
+        with open(LAST_COMPLETED_FILENAME(), 'r', newline='') as csvfile:
+            reader = csv.DictReader(csvfile, delimiter='\t')
+            for row in reader:
+                # Convert fields to appropriate data types
+                row['start'] = datetime.strptime(row['start'], '%d.%m.%Y %H:%M')
+                row['min'] = float(row['min'])
+                row['max'] = float(row['max'])
+                row['mean'] = float(row['mean'])
+                existing_data.append(row)
         return existing_data
     else:
         return []
 
-def get_delta_data(forecast, existing):
-    existing_keys = {(row['statistic_id'], row['start']) for row in existing}
-    
-    delta = [row for row in forecast if (row['statistic_id'], row['start']) not in existing_keys]
-    
+def get_delta_data(forecast_data, existing_data):
+    existing_starts = set(row['start'] for row in existing_data)
+    delta_data = [row for row in forecast_data if row['start'] not in existing_starts]
     print('DELTA:')
-    for row in delta:
-        print(row)
-    
-    return delta
+    print(delta_data)
+    return delta_data
 
 def save_delta(delta_data):
-    with open(DELTA_FILENAME(), mode='w', newline='') as file:
-        writer = csv.DictWriter(file, fieldnames=['statistic_id', 'unit', 'start', 'min', 'max', 'mean'], delimiter='\t')
+    with open(DELTA_FILENAME(), 'w', newline='') as csvfile:
+        fieldnames = ['statistic_id', 'unit', 'start', 'min', 'max', 'mean']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames, delimiter='\t')
         writer.writeheader()
-        writer.writerows(delta_data)
+        for row in delta_data:
+            # Format 'start' field for output
+            row['start'] = row['start'].strftime('%d.%m.%Y %H:%M')
+            writer.writerow({field: row[field] for field in fieldnames})
 
-def update_existing(forecast):
-    with open(LAST_COMPLETED_FILENAME(), mode='w', newline='') as file:
-        writer = csv.DictWriter(file, fieldnames=['statistic_id', 'unit', 'start', 'min', 'max', 'mean'], delimiter='\t')
+def update_existing(forecast_data):
+    with open(LAST_COMPLETED_FILENAME(), 'w', newline='') as csvfile:
+        fieldnames = ['statistic_id', 'unit', 'start', 'min', 'max', 'mean']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames, delimiter='\t')
         writer.writeheader()
-        writer.writerows(forecast)
+        for row in forecast_data:
+            # Format 'start' field for output
+            row['start'] = row['start'].strftime('%d.%m.%Y %H:%M')
+            writer.writerow({field: row[field] for field in fieldnames})
 
-forecast_data = download_data()
-existing_data = get_existing()
-delta_data = get_delta_data(forecast_data, existing_data)
-save_delta(delta_data)
-update_existing(forecast_data)
+if __name__ == '__main__':
+    forecast_data = download_data()
+    existing_data = get_existing()
+    delta_data = get_delta_data(forecast_data, existing_data)
+    save_delta(delta_data)
+    run_import()
+    update_existing(forecast_data)
