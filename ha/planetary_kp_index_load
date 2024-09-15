@@ -3,6 +3,7 @@ import pandas as pd
 from requests import post,get
 import io
 import os
+from local_token import HA_TOKEN
 
 def LAST_COMPLETED_FILENAME():
     return 'noaa-planetary-k-index-forecast_completed.csv'
@@ -10,8 +11,8 @@ def LAST_COMPLETED_FILENAME():
 def DELTA_FILENAME():
     return '../noaa-planetary-k-index-forecast_delta.csv'
 
-def HA_TOKEN():
-    return ""
+#def HA_TOKEN():
+#    return ""
 
 def download_data():
     url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json"
